@@ -28,6 +28,7 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"encoding/csv"
 	"flag"
@@ -149,41 +150,55 @@ Copyright ©2020 Dan Kortschak. All rights reserved.
 			log.Fatal(d)
 		}
 	}
+
+	var buf []bytes.Buffer
 	if *debug {
 		fmt.Printf("go_term\tgo_root\tgo_aspect\tdepth\t%s\n", strings.Join(data.names, "\t"))
+		buf = make([]bytes.Buffer, len(ontoData))
 	}
+
+	var wg sync.WaitGroup
 	for i := range ontoData {
-		lastD := -1
-		var goTerms []string
-		walkDownSubClassesFrom(roots[i], ontology, func(r, t rdf.Term, d int) {
-			if *debug {
-				counts, ok := ontoData[i][t.Value]
-				if !ok {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			lastD := -1
+			var goTerms []string
+			walkDownSubClassesFrom(roots[i], ontology, func(r, t rdf.Term, d int) {
+				if *debug {
+					counts, ok := ontoData[i][t.Value]
+					if !ok {
+						return
+					}
+					fmt.Fprintf(&buf[i], "%s\t%s\t%s\t%d", strip(t.Value, "<obo:", ">"), strip(r.Value, "<obo:", ">"), nameSpaceOf(t, ontology), d)
+					for _, v := range counts.vector {
+						fmt.Fprintf(&buf[i], "\t%0*b", len(data.geneIDs), &v)
+					}
+					fmt.Fprintln(&buf[i])
+				}
+
+				if lastD == -1 || d == lastD {
+					goTerms = append(goTerms, t.Value)
+					lastD = d
 					return
 				}
-				fmt.Printf("%s\t%s\t%s\t%d", strip(t.Value, "<obo:", ">"), strip(r.Value, "<obo:", ">"), nameSpaceOf(t, ontology), d)
-				for _, v := range counts.vector {
-					fmt.Printf("\t%0*b", len(data.geneIDs), &v)
-				}
-				fmt.Println()
-			}
-
-			if lastD == -1 || d == lastD {
-				goTerms = append(goTerms, t.Value)
 				lastD = d
-				return
-			}
-			lastD = d
 
-			// Write out matrices for this depth. Note that d is now
-			// referring to the next level.
-			writeCountData(r.Value, d-1, goTerms, data, ontoData[i], *cut, *frac)
-			goTerms = goTerms[:0]
-			goTerms = append(goTerms, t.Value)
-		})
+				// Write out matrices for this depth. Note that d is now
+				// referring to the next level.
+				writeCountData(r.Value, d-1, goTerms, data, ontoData[i], *cut, *frac)
+				goTerms = goTerms[:0]
+				goTerms = append(goTerms, t.Value)
+			})
 
-		// Write out last depth.
-		writeCountData(roots[i].Value, lastD, goTerms, data, ontoData[i], *cut, *frac)
+			// Write out last depth.
+			writeCountData(roots[i].Value, lastD, goTerms, data, ontoData[i], *cut, *frac)
+		}()
+	}
+	wg.Wait()
+	for i := range buf {
+		io.Copy(os.Stdout, &buf[i])
 	}
 }
 
