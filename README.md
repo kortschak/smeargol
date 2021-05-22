@@ -8,7 +8,21 @@ The figure below shows a portion of the biological process DAG from the GO. Each
 
 ![Painting eight genes onto a portion of the biological process DAG](painting.png)
 
-Later analysis then distributes the actual counts obtained from transcriptomic (or other) analysis over the painted nodes.
+The bit vectors are then extracted into a matrix for each depth of the DAG. For example for the DAG shown, the level 2 matrix would look like this.
+
+```
+      GO:0003008 GO:0006928 GO:0007611 GO:0007626 GO:0048870
+gene1      0          0          0          0          0
+gene2      0          0          0          0          0
+gene3      0          0          0          0          0
+gene4      0          0          0          1          0
+gene5      1          0          1          0          0
+gene6      0          1          0          0          1
+gene7      1          0          1          0          0
+gene8      0          1          0          0          1
+```
+
+The actual counts obtained from transcriptomic (or other) analysis are then distributed over the painted nodes. To identify the most appropriate level to perform a comparison with, each GO level's matrix is decomposed to find the number of singular values above the noise floor. The GO level with the highest rank thresholded for noise is then chosen.
 
 The input counts file is a tab-delimited file with the first column being Ensembl gene ID (ENSG00000000000) and remaining columns being count data. The first row is expected to be labelled with the first column being Geneid and the remaining columns holding the names of the samples.
 
