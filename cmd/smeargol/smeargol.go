@@ -32,8 +32,11 @@ import (
 	"encoding/csv"
 	"flag"
 	"fmt"
+	"image/color"
 	"io"
 	"log"
+	"math"
+	"math/big"
 	"os"
 	"path/filepath"
 	"sort"
@@ -45,6 +48,11 @@ import (
 	"gonum.org/v1/gonum/graph"
 	"gonum.org/v1/gonum/graph/formats/rdf"
 	"gonum.org/v1/gonum/graph/traverse"
+	"gonum.org/v1/gonum/mat"
+	"gonum.org/v1/gonum/stat"
+	"gonum.org/v1/plot"
+	"gonum.org/v1/plot/plotter"
+	"gonum.org/v1/plot/vg"
 
 	"github.com/kortschak/gogo"
 
@@ -57,6 +65,9 @@ func main() {
 		ontopath = flag.String("ontology", "", "specify the GO file (.owl.gz - required)")
 		mappath  = flag.String("map", "", "specify the ENSG to GO mapping (.nt.gz/.nq.gz - required)")
 		lean     = flag.Bool("lean", true, "only load relevant parts of ontology")
+		cut      = flag.Float64("cut", 1, "minimum valid singular value")
+		frac     = flag.Float64("frac", 0.75, "include singular values up to this cumulative fraction")
+		debug    = flag.Bool("debug", false, "output binary assignments - only small sets")
 		help     = flag.Bool("help", false, "print help text")
 	)
 	flag.Parse()
@@ -125,23 +136,293 @@ Copyright ©2020 Dan Kortschak. All rights reserved.
 
 	log.Println("[smearing counts]")
 	roots := ontology.Roots(false)
+	sort.Slice(roots, func(i, j int) bool { return roots[i].Value < roots[j].Value })
 	ontoData := distributeCounts(ontology, roots, data)
 
-	log.Println("[printing smeared counts]")
-	fmt.Printf("go_term\tgo_root\tgo_aspect\tdepth\t%s\n", strings.Join(data.names, "\t"))
+	log.Println("[writing smeared count matrices]")
+	for _, d := range []string{
+		"matrices",
+		"plots",
+	} {
+		err = os.Mkdir(d, 0o755)
+		if err != nil {
+			log.Fatal(d)
+		}
+	}
+	if *debug {
+		fmt.Printf("go_term\tgo_root\tgo_aspect\tdepth\t%s\n", strings.Join(data.names, "\t"))
+	}
 	for i := range ontoData {
+		lastD := -1
+		var goTerms []string
 		walkDownSubClassesFrom(roots[i], ontology, func(r, t rdf.Term, d int) {
-			counts, ok := ontoData[i][t.Value]
-			if !ok {
+			if *debug {
+				counts, ok := ontoData[i][t.Value]
+				if !ok {
+					return
+				}
+				fmt.Printf("%s\t%s\t%s\t%d", strip(t.Value, "<obo:", ">"), strip(r.Value, "<obo:", ">"), nameSpaceOf(t, ontology), d)
+				for _, v := range counts.vector {
+					fmt.Printf("\t%0*b", len(data.geneIDs), &v)
+				}
+				fmt.Println()
+			}
+
+			if lastD == -1 || d == lastD {
+				goTerms = append(goTerms, t.Value)
+				lastD = d
 				return
 			}
-			fmt.Printf("%s\t%s\t%s\t%d", t.Value, r.Value, nameSpaceOf(t, ontology), d)
-			for _, v := range counts {
-				fmt.Printf("\t%v", v)
-			}
-			fmt.Println()
+			lastD = d
+
+			// Write out matrices for this depth. Note that d is now
+			// referring to the next level.
+			writeCountData(r.Value, d-1, goTerms, data, ontoData[i], *cut, *frac)
+			goTerms = goTerms[:0]
+			goTerms = append(goTerms, t.Value)
 		})
+
+		// Write out last depth.
+		writeCountData(roots[i].Value, lastD, goTerms, data, ontoData[i], *cut, *frac)
 	}
+}
+
+// writeCountData writes out a matrix of gene expression data summed according
+// to the bit vector data collected during the walk of the GO DAG. It also
+// performs an SVD of the matrix, plotting the singular values and obtaining
+// an optimal truncation for each GO level/aspect.
+func writeCountData(root string, depth int, goTerms []string, data *countData, ontoData map[string]ontoCounts, cut, frac float64) error {
+	if len(goTerms) == 0 || len(data.geneIDs) == 0 {
+		return nil
+	}
+	root = strip(root, "<obo:", ">")
+
+	sort.Strings(goTerms)
+	m := mat.NewDense(len(data.geneIDs), len(goTerms), nil) // Assume all samples have same genes.
+	for sample, name := range data.names {
+		for col, term := range goTerms {
+			counts, ok := ontoData[term]
+			if !ok {
+				continue
+			}
+			for row, geneID := range data.geneIDs {
+				if counts.vector[sample].Bit(row) == 0 {
+					continue
+				}
+				m.Set(row, col, data.counts[geneID][sample])
+			}
+		}
+
+		path := fmt.Sprintf("%s_%s_%03d", name, root, depth)
+		err := optimalTruncation(path, m, cut, frac)
+		if err != nil {
+			log.Println(err)
+		}
+		err = writeMatrix(path, data.geneIDs, goTerms, m)
+		if err != nil {
+			return err
+		}
+
+		m.Zero()
+	}
+
+	return nil
+}
+
+// https://arxiv.org/abs/1305.5870
+func optimalTruncation(path string, m *mat.Dense, cut, frac float64) error {
+	var svd mat.SVD
+	ok := svd.Factorize(m, mat.SVDThin)
+	if !ok {
+		return fmt.Errorf("could not factorise %q", path)
+	}
+	sigma := svd.Values(nil)
+
+	sum := make([]float64, len(sigma))
+	floats.CumSum(sum, sigma)
+	floats.Scale(1/sum[len(sum)-1], sum)
+	rFrac := idxAbove(frac, sum)
+
+	sigma = sigma[:idxBelow(cut, sigma)]
+	rows, cols := m.Dims()
+	t := tau(rows, cols, sigma)
+	rOpt := idxBelow(t, sigma)
+
+	if false {
+		fmt.Printf("%s: %d[:%d]\n\t%v\n\t%v\n", path, len(sigma), rOpt, sigma, sigma[:rOpt])
+	}
+
+	p := plot.New()
+	p.Title.Text = fmt.Sprintf("Singular Values\n%s", path)
+	p.Y.Scale = logScale{}
+	p.Y.Tick.Marker = logTicks{}
+	sigXYs := sliceToXYs(sigma)
+	if len(sigXYs) != 0 {
+		values, err := plotter.NewLine(sigXYs)
+		if err != nil {
+			return err
+		}
+		threshOpt, err := plotter.NewLine(plotter.XYs{{X: 0, Y: t}, {X: sigXYs[len(sigXYs)-1].X, Y: t}})
+		if err != nil {
+			return err
+		}
+		threshOpt.Color = color.RGBA{B: 255, A: 255}
+		p.Add(values, threshOpt)
+		if rFrac < len(sigma) {
+			threshFrac, err := plotter.NewLine(plotter.XYs{{X: 0, Y: sigma[rFrac]}, {X: sigXYs[len(sigXYs)-1].X, Y: sigma[rFrac]}})
+			if err != nil {
+				return err
+			}
+			threshFrac.Color = color.RGBA{R: 255, A: 255}
+			p.Add(threshFrac)
+		}
+	}
+	return p.Save(18*vg.Centimeter, 15*vg.Centimeter, filepath.Join("plots", path+".png"))
+}
+
+func idxAbove(thresh float64, s []float64) int {
+	for i, v := range s {
+		if v > thresh {
+			return i
+		}
+	}
+	return len(s)
+}
+
+func idxBelow(thresh float64, s []float64) int {
+	for i, v := range s {
+		if v < thresh {
+			return i
+		}
+	}
+	return len(s)
+}
+
+// https://arxiv.org/abs/1305.5870 Eq. 4.
+func tau(rows, cols int, values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	reverseFloats(values)
+	m := stat.Quantile(0.5, 1, values, nil)
+	reverseFloats(values)
+	return omega(rows, cols) * m
+}
+
+func reverseFloats(f []float64) {
+	for i, j := 0, len(f)-1; i < j; i, j = i+1, j-1 {
+		f[i], f[j] = f[j], f[i]
+	}
+}
+
+// https://arxiv.org/abs/1305.5870 Eq. 5.
+func omega(rows, cols int) float64 {
+	beta := float64(rows) / float64(cols)
+	beta2 := beta * beta
+	return 0.56*beta2*beta - 0.95*beta2 + 1.82*beta + 1.43
+}
+
+func sliceToXYs(s []float64) plotter.XYs {
+	xy := make(plotter.XYs, len(s))
+	for i, v := range s {
+		if v == 0 {
+			return xy[:i]
+		}
+		xy[i] = plotter.XY{X: float64(i), Y: v}
+	}
+	return xy
+}
+
+type logScale struct{}
+
+func (logScale) Normalize(min, max, x float64) float64 {
+	min = math.Max(min, 1e-16)
+	max = math.Max(max, 1e-16)
+	x = math.Max(x, 1e-16)
+	logMin := math.Log(min)
+	return (math.Log(x) - logMin) / (math.Log(max) - logMin)
+}
+
+type logTicks struct{ powers int }
+
+func (t logTicks) Ticks(min, max float64) []plot.Tick {
+	min = math.Max(min, 1e-16)
+	max = math.Max(max, 1e-16)
+	if t.powers < 1 {
+		t.powers = 1
+	}
+
+	val := math.Pow10(int(math.Log10(min)))
+	max = math.Pow10(int(math.Ceil(math.Log10(max))))
+	var ticks []plot.Tick
+	for val < max {
+		for i := 1; i < 10; i++ {
+			if i == 1 {
+				ticks = append(ticks, plot.Tick{Value: val, Label: strconv.FormatFloat(val, 'e', 0, 64)})
+			}
+			if t.powers != 1 {
+				break
+			}
+			ticks = append(ticks, plot.Tick{Value: val * float64(i)})
+		}
+		val *= math.Pow10(t.powers)
+	}
+	ticks = append(ticks, plot.Tick{Value: val, Label: strconv.FormatFloat(val, 'e', 0, 64)})
+
+	return ticks
+}
+
+func writeMatrix(path string, rows, cols []string, data *mat.Dense) (err error) {
+	f, err := os.Create(filepath.Join("matrices", path+".tsv"))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err = f.Close()
+	}()
+
+	_, err = f.Write([]byte{'\t'})
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(strings.Join(stripSlice(cols, "<obo:", ">"), "\t"))
+	if err != nil {
+		return err
+	}
+	_, err = f.Write([]byte{'\n'})
+	if err != nil {
+		return err
+	}
+
+	for r, id := range rows {
+		_, err = f.WriteString(id)
+		if err != nil {
+			return err
+		}
+		for c := range cols {
+			_, err = fmt.Fprintf(f, "\t%v", data.At(r, c))
+			if err != nil {
+				return err
+			}
+		}
+		_, err = f.Write([]byte{'\n'})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func stripSlice(s []string, prefix, suffix string) []string {
+	n := make([]string, len(s))
+	for i, e := range s {
+		n[i] = strip(e, prefix, suffix)
+	}
+	return n
+}
+
+func strip(s, prefix, suffix string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(s, prefix), suffix)
 }
 
 // countData holds count data for a set of named samples each with a collection
@@ -157,6 +438,12 @@ type countData struct {
 	// and indexing into the []float64
 	// reflects indexing into names.
 	counts map[string][]float64
+
+	// geneIDs and geneIdx are mappings
+	// between internal gene index and
+	// external gene identifier.
+	geneIDs []string
+	geneIdx map[string]int
 }
 
 // mappingCounts returns the count data held in the file at path.
@@ -189,6 +476,8 @@ func mappingCounts(path string) (*countData, error) {
 	samples := labels[1:]
 
 	data := make(map[string][]float64, len(samples))
+	geneIdx := make(map[string]int)
+	var geneIDs []string
 
 	c.ReuseRecord = true
 	for {
@@ -200,6 +489,8 @@ func mappingCounts(path string) (*countData, error) {
 			break
 		}
 		geneid := counts[0]
+		geneIdx[geneid] = len(geneIDs)
+		geneIDs = append(geneIDs, geneid)
 		for i, f := range counts[1:] {
 			v, err := strconv.ParseFloat(f, 64)
 			if err != nil {
@@ -210,8 +501,10 @@ func mappingCounts(path string) (*countData, error) {
 	}
 
 	return &countData{
-		names:  samples,
-		counts: data,
+		names:   samples,
+		counts:  data,
+		geneIDs: geneIDs,
+		geneIdx: geneIdx,
 	}, nil
 }
 
@@ -256,6 +549,7 @@ func ontologyGraph(path string, lean bool) (*gogo.Graph, error) {
 				continue
 			}
 		}
+
 		g.AddStatement(s)
 	}
 
@@ -293,7 +587,7 @@ func connectGeneIDsTo(dst *gogo.Graph, path string, counts map[string][]float64)
 		}
 
 		// Only keep annotations needed for the given counts.
-		id := strings.TrimSuffix(strings.TrimPrefix(s.Object.Value, "<ensembl:"), ">")
+		id := strip(s.Object.Value, "<ensembl:", ">")
 		if _, ok := counts[id]; !ok {
 			continue
 		}
@@ -305,16 +599,20 @@ func connectGeneIDsTo(dst *gogo.Graph, path string, counts map[string][]float64)
 	}
 }
 
+type ontoCounts struct {
+	vector []big.Int
+}
+
 // distributeCounts performs a breadth-first traversal from each of the leaf-most
 // terms associated with each of the genes held by data, for each of the sample
 // in data independently.
 // Each gene ontology aspect is analysed separately since the aspects are not
 // connected. The analyses are performed in parallel; the length of the
 // returned slice will be the same as the number of roots passed in.
-func distributeCounts(g *gogo.Graph, roots []rdf.Term, data *countData) []map[string][]float64 {
-	ontoData := make([]map[string][]float64, len(roots))
+func distributeCounts(g *gogo.Graph, roots []rdf.Term, data *countData) []map[string]ontoCounts {
+	ontoData := make([]map[string]ontoCounts, len(roots))
 	for i := range ontoData {
-		ontoData[i] = make(map[string][]float64)
+		ontoData[i] = make(map[string]ontoCounts)
 	}
 
 	dfs := make([]traverse.DepthFirst, len(roots))
@@ -331,22 +629,10 @@ func distributeCounts(g *gogo.Graph, roots []rdf.Term, data *countData) []map[st
 				defer wg.Done()
 				dfs[i].Reset()
 				for _, l := range aspect {
-					if !dfs[i].Visited(l) {
-						dst := ontoData[i][l.Value]
-						if dst == nil {
-							dst = make([]float64, len(counts))
-							ontoData[i][l.Value] = dst
-						}
-						floats.Add(dst, counts)
-					}
+					updateOntoData(ontoData[i], l, geneid, counts, data)
 					dfs[i].Walk(g, l, func(n graph.Node) bool {
 						t := n.(rdf.Term)
-						dst := ontoData[i][t.Value]
-						if dst == nil {
-							dst = make([]float64, len(counts))
-							ontoData[i][t.Value] = dst
-						}
-						floats.Add(dst, counts)
+						updateOntoData(ontoData[i], t, geneid, counts, data)
 						return false
 					})
 				}
@@ -356,6 +642,24 @@ func distributeCounts(g *gogo.Graph, roots []rdf.Term, data *countData) []map[st
 	}
 
 	return ontoData
+}
+
+func updateOntoData(ontoData map[string]ontoCounts, t rdf.Term, geneid string, counts []float64, data *countData) {
+	dst, ok := ontoData[t.Value]
+	if !ok {
+		vector := make([]big.Int, len(counts))
+		for _, v := range vector {
+			v.SetBit(&v, len(data.geneIdx), 0)
+		}
+		dst.vector = vector
+		ontoData[t.Value] = dst
+	}
+	for j, c := range counts {
+		if c == 0 {
+			continue
+		}
+		dst.vector[j].SetBit(&dst.vector[j], data.geneIdx[geneid], 1)
+	}
 }
 
 // isSubClassOfGO is a traverse edge filter. It accepts statements where
