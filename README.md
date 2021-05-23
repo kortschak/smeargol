@@ -2,7 +2,7 @@
 
 `smeargol` is a tool for non-redundantly assigning gene count data to Gene Ontology terms associated with the genes. It is based on ideas from [Fruzangohar _et al._](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0170486).
 
-`smeargol` distributes count data across the Gene Ontology DAG provided and prints the GO terms, their roots and depths and distributed counts in a tsv table to stdout. It logs gene identifiers that do not have GO term annotations to stderr. The graph analysis assumes Ensembl gene identifiers and Gene Ontology graph structure.
+`smeargol` distributes count data across the Gene Ontology DAG provided and writes tsv files holding the GO terms and distributed counts, and plot files of singular values. The files have their roots and depths specified in the file names. It logs gene identifiers that do not have GO term annotations to stderr. The graph analysis assumes Ensembl gene identifiers and Gene Ontology graph structure.
 
 The figure below shows a portion of the biological process DAG from the GO. Each node is marked with the GO identifier, the distance from the root in square brackets, and a bit vector showing which genes have been painted onto the node.
 
