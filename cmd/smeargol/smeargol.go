@@ -112,6 +112,15 @@ Copyright ©2020 Dan Kortschak. All rights reserved.
 	}
 
 	log.Println(os.Args)
+	for _, d := range []string{
+		"matrices",
+		"plots",
+	} {
+		err := os.Mkdir(d, 0o755)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 
 	log.Println("[loading count data]")
 	data, err := mappingCounts(*in)
@@ -141,15 +150,6 @@ Copyright ©2020 Dan Kortschak. All rights reserved.
 	ontoData := distributeCounts(ontology, roots, data)
 
 	log.Println("[writing smeared count matrices]")
-	for _, d := range []string{
-		"matrices",
-		"plots",
-	} {
-		err = os.Mkdir(d, 0o755)
-		if err != nil {
-			log.Fatal(d)
-		}
-	}
 
 	var buf []bytes.Buffer
 	if *debug {
