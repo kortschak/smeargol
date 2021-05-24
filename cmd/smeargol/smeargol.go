@@ -28,7 +28,6 @@
 package main
 
 import (
-	"bytes"
 	"compress/gzip"
 	"encoding/csv"
 	"flag"
@@ -151,10 +150,9 @@ Copyright ©2020 Dan Kortschak. All rights reserved.
 
 	log.Println("[writing smeared count matrices]")
 
-	var buf []bytes.Buffer
+	var dw *debugWriter
 	if *debug {
-		fmt.Printf("go_term\tgo_root\tgo_aspect\tdepth\t%s\n", strings.Join(data.names, "\t"))
-		buf = make([]bytes.Buffer, len(ontoData))
+		dw = newDebugWriter(ontology, ontoData, data)
 	}
 
 	var wg sync.WaitGroup
@@ -166,17 +164,7 @@ Copyright ©2020 Dan Kortschak. All rights reserved.
 			lastD := -1
 			var goTerms []string
 			walkDownSubClassesFrom(roots[i], ontology, func(r, t rdf.Term, d int) {
-				if *debug {
-					counts, ok := ontoData[i][t.Value]
-					if !ok {
-						return
-					}
-					fmt.Fprintf(&buf[i], "%s\t%s\t%s\t%d", strip(t.Value, "<obo:", ">"), strip(r.Value, "<obo:", ">"), nameSpaceOf(t, ontology), d)
-					for _, v := range counts.vector {
-						fmt.Fprintf(&buf[i], "\t%0*b", len(data.geneIDs), &v)
-					}
-					fmt.Fprintln(&buf[i])
-				}
+				dw.record(i, d, r, t)
 
 				if lastD == -1 || d == lastD {
 					goTerms = append(goTerms, t.Value)
@@ -197,9 +185,7 @@ Copyright ©2020 Dan Kortschak. All rights reserved.
 		}()
 	}
 	wg.Wait()
-	for i := range buf {
-		io.Copy(os.Stdout, &buf[i])
-	}
+	dw.flush()
 }
 
 // writeCountData writes out a matrix of gene expression data summed according
