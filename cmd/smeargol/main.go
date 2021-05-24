@@ -32,10 +32,8 @@ import (
 	"encoding/csv"
 	"flag"
 	"fmt"
-	"image/color"
 	"io"
 	"log"
-	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -50,9 +48,6 @@ import (
 	"gonum.org/v1/gonum/graph/traverse"
 	"gonum.org/v1/gonum/mat"
 	"gonum.org/v1/gonum/stat"
-	"gonum.org/v1/plot"
-	"gonum.org/v1/plot/plotter"
-	"gonum.org/v1/plot/vg"
 
 	"github.com/kortschak/gogo"
 
@@ -243,6 +238,13 @@ func optimalTruncation(path string, m *mat.Dense, cut, frac float64) error {
 	floats.CumSum(sum, sigma)
 	floats.Scale(1/sum[len(sum)-1], sum)
 	rFrac := idxAbove(frac, sum)
+	var f float64
+	switch {
+	case rFrac < len(sigma):
+		f = sigma[rFrac]
+	case len(sigma) != 0:
+		f = sigma[0]
+	}
 
 	sigma = sigma[:idxBelow(cut, sigma)]
 	rows, cols := m.Dims()
@@ -253,32 +255,7 @@ func optimalTruncation(path string, m *mat.Dense, cut, frac float64) error {
 		fmt.Printf("%s: %d[:%d]\n\t%v\n\t%v\n", path, len(sigma), rOpt, sigma, sigma[:rOpt])
 	}
 
-	p := plot.New()
-	p.Title.Text = fmt.Sprintf("Singular Values\n%s", path)
-	p.Y.Scale = logScale{}
-	p.Y.Tick.Marker = logTicks{}
-	sigXYs := sliceToXYs(sigma)
-	if len(sigXYs) != 0 {
-		values, err := plotter.NewLine(sigXYs)
-		if err != nil {
-			return err
-		}
-		threshOpt, err := plotter.NewLine(plotter.XYs{{X: 0, Y: t}, {X: sigXYs[len(sigXYs)-1].X, Y: t}})
-		if err != nil {
-			return err
-		}
-		threshOpt.Color = color.RGBA{B: 255, A: 255}
-		p.Add(values, threshOpt)
-		if rFrac < len(sigma) {
-			threshFrac, err := plotter.NewLine(plotter.XYs{{X: 0, Y: sigma[rFrac]}, {X: sigXYs[len(sigXYs)-1].X, Y: sigma[rFrac]}})
-			if err != nil {
-				return err
-			}
-			threshFrac.Color = color.RGBA{R: 255, A: 255}
-			p.Add(threshFrac)
-		}
-	}
-	return p.Save(18*vg.Centimeter, 15*vg.Centimeter, filepath.Join("plots", path+".png"))
+	return plotValues(path, sigma, t, f, rOpt, rFrac)
 }
 
 func idxAbove(thresh float64, s []float64) int {
@@ -321,56 +298,6 @@ func omega(rows, cols int) float64 {
 	beta := float64(rows) / float64(cols)
 	beta2 := beta * beta
 	return 0.56*beta2*beta - 0.95*beta2 + 1.82*beta + 1.43
-}
-
-func sliceToXYs(s []float64) plotter.XYs {
-	xy := make(plotter.XYs, len(s))
-	for i, v := range s {
-		if v == 0 {
-			return xy[:i]
-		}
-		xy[i] = plotter.XY{X: float64(i), Y: v}
-	}
-	return xy
-}
-
-type logScale struct{}
-
-func (logScale) Normalize(min, max, x float64) float64 {
-	min = math.Max(min, 1e-16)
-	max = math.Max(max, 1e-16)
-	x = math.Max(x, 1e-16)
-	logMin := math.Log(min)
-	return (math.Log(x) - logMin) / (math.Log(max) - logMin)
-}
-
-type logTicks struct{ powers int }
-
-func (t logTicks) Ticks(min, max float64) []plot.Tick {
-	min = math.Max(min, 1e-16)
-	max = math.Max(max, 1e-16)
-	if t.powers < 1 {
-		t.powers = 1
-	}
-
-	val := math.Pow10(int(math.Log10(min)))
-	max = math.Pow10(int(math.Ceil(math.Log10(max))))
-	var ticks []plot.Tick
-	for val < max {
-		for i := 1; i < 10; i++ {
-			if i == 1 {
-				ticks = append(ticks, plot.Tick{Value: val, Label: strconv.FormatFloat(val, 'e', 0, 64)})
-			}
-			if t.powers != 1 {
-				break
-			}
-			ticks = append(ticks, plot.Tick{Value: val * float64(i)})
-		}
-		val *= math.Pow10(t.powers)
-	}
-	ticks = append(ticks, plot.Tick{Value: val, Label: strconv.FormatFloat(val, 'e', 0, 64)})
-
-	return ticks
 }
 
 func writeMatrix(path string, rows, cols []string, data *mat.Dense) (err error) {
