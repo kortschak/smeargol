@@ -4,11 +4,11 @@
 
 `smeargol` distributes count data across the Gene Ontology DAG provided and writes tsv files holding the GO terms and distributed counts, and plot files of singular values. The files have their roots and depths specified in the file names. It logs gene identifiers that do not have GO term annotations to stderr. The graph analysis assumes Ensembl gene identifiers and Gene Ontology graph structure.
 
-The figure below shows a portion of the biological process DAG from the GO. Each node is marked with the GO identifier, the distance from the root in square brackets, and a bit vector showing which genes have been painted onto the node.
+The figure below shows a portion of the biological process DAG from the GO. Each node is marked with the GO identifier, the distance from the root in square brackets, and a list of bit vector showing which genes have been painted onto the node for each of the samples, 0 and 1. The gene nodes show the counts for the gene in each sample.
 
 ![Painting eight genes onto a portion of the biological process DAG](painting.png)
 
-The bit vectors are then extracted into a matrix for each depth of the DAG. For example for the DAG shown, the level 2 matrix would look like this.
+The bit vectors are then extracted into a matrix for each depth of the DAG. For example for the DAG shown, the level 2 matrix for sample 0 would look like this.
 
 ```
       GO:0003008 GO:0006928 GO:0007611 GO:0007626 GO:0048870
