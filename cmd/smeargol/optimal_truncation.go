@@ -12,37 +12,77 @@ import (
 	"gonum.org/v1/gonum/stat"
 )
 
+type SummaryDoc struct {
+	// Roots is the set of roots in the Gene Ontology.
+	Roots []string
+
+	// Summaries contains the summaries of a smeargol
+	// analysis.
+	Summaries [][]*Summary
+}
+
+type Summary struct {
+	// Name is the name of the sample.
+	Name string
+
+	// Root is the root GO term for the summary.
+	Root string
+
+	// Depth is the distance from the root.
+	Depth int
+
+	// Rows and Cols are the dimensions of the matrix
+	// describing the GO level. Rows corresponds to the
+	// number of genes and Cols corresponds to the number
+	// of GO terms in the level.
+	Rows, Cols int
+
+	// OptimalRank and FractionalRank are the calculated
+	// ranks of the summary matrix. OptimalRank is
+	// calculated according to the method of Matan Gavish
+	// and David L. Donoho https://arxiv.org/abs/1305.5870.
+	// FractionalRank is the rank calculated using the
+	// user-provided fraction parameters.
+	OptimalRank, FractionalRank int
+
+	// Sigma is the complete set of singular values.
+	Sigma []float64
+}
+
 // https://arxiv.org/abs/1305.5870
-func optimalTruncation(path string, m *mat.Dense, cut, frac float64) error {
+func optimalTruncation(path string, m *mat.Dense, cut, frac float64) (*Summary, error) {
 	var svd mat.SVD
 	ok := svd.Factorize(m, mat.SVDThin)
 	if !ok {
-		return fmt.Errorf("could not factorise %q", path)
+		return nil, fmt.Errorf("could not factorise %q", path)
 	}
 	sigma := svd.Values(nil)
 
 	sum := make([]float64, len(sigma))
 	floats.CumSum(sum, sigma)
-	floats.Scale(1/sum[len(sum)-1], sum)
-	rFrac := idxAbove(frac, sum)
+	var rFrac int
 	var f float64
-	switch {
-	case rFrac < len(sigma):
-		f = sigma[rFrac]
-	case len(sigma) != 0:
-		f = sigma[0]
+	max := sum[len(sum)-1]
+	if max != 0 {
+		floats.Scale(1/max, sum)
+		rFrac = idxAbove(frac, sum)
+		switch {
+		case rFrac < len(sigma):
+			f = sigma[rFrac]
+		case len(sigma) != 0:
+			f = sigma[0]
+		}
 	}
 
-	sigma = sigma[:idxBelow(cut, sigma)]
+	sigmaCut := sigma[:idxBelow(cut, sigma)]
+
 	rows, cols := m.Dims()
-	t := tau(rows, cols, sigma)
-	rOpt := idxBelow(t, sigma)
+	t := tau(rows, cols, sigmaCut)
+	rOpt := idxBelow(t, sigmaCut)
 
-	if false {
-		fmt.Printf("%s: %d[:%d]\n\t%v\n\t%v\n", path, len(sigma), rOpt, sigma, sigma[:rOpt])
-	}
+	err := plotValues(path, sigmaCut, t, f, rOpt, rFrac)
 
-	return plotValues(path, sigma, t, f, rOpt, rFrac)
+	return &Summary{Rows: rows, Cols: cols, OptimalRank: rOpt, FractionalRank: rFrac, Sigma: sigma}, err
 }
 
 func idxAbove(thresh float64, s []float64) int {
